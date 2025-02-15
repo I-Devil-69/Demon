@@ -1,64 +1,91 @@
 import flet as ft
-import os
-import torch
-import whisper
-import openai
 import cv2
-import numpy as np
-from deepface import DeepFace
+import mediapipe as mp
+import speech_recognition as sr
+import threading
+import g4f
 
-# Initialize AI models
-whisper_model = whisper.load_model("small")
-openai.api_key = "YOUR_OPENAI_API_KEY"
-
-# GUI Application
-def main(page: ft.Page):
-    page.title = "All-in-One AI System"
-    page.window_width = 800
-    page.window_height = 600
-
-    # Voice Command Input
-    def recognize_voice(e):
-        with open("voice_input.wav", "rb") as audio:
-            result = whisper_model.transcribe(audio)
-            text_output.value = result["text"]
-            page.update()
-
-    voice_button = ft.ElevatedButton("Record Voice", on_click=recognize_voice)
-    text_output = ft.Text("Recognized Speech: ")
-
-    # Face Modification
-    def modify_face(e):
-        img = cv2.imread("input.jpg")
-        modified_img = DeepFace.analyze(img, actions=["age", "gender"])
-        cv2.imwrite("output.jpg", modified_img)
-        face_output.src = "output.jpg"
-        page.update()
-
-    face_button = ft.ElevatedButton("Modify Face", on_click=modify_face)
-    face_output = ft.Image(src="")
-
-    # AI Chatbot
-    def chatbot_response(e):
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": chat_input.value}]
-        )
-        chat_output.value = response["choices"][0]["message"]["content"]
-        page.update()
-
-    chat_input = ft.TextField(label="Ask AI", width=300)
-    chat_button = ft.ElevatedButton("Chat", on_click=chatbot_response)
-    chat_output = ft.Text("Response: ")
-
-    # Adding Components to UI
-    page.add(
-        ft.Column([
-            voice_button, text_output,
-            face_button, face_output,
-            chat_input, chat_button, chat_output
-        ])
+# Function to query GPT4Free
+def chatgpt_query(prompt):
+    response = g4f.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}]
     )
+    return response
 
-# Run the app
+class AIAssistant:
+    def __init__(self, page):
+        self.page = page
+        self.recognizer = sr.Recognizer()
+        self.camera = cv2.VideoCapture(0)
+        self.hands = mp.solutions.hands.Hands()
+        self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        self.eyes_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+        self.running = True
+
+        # UI Elements
+        self.page.title = "AI Assistant"
+        self.page.window_width = 500
+        self.page.window_height = 700
+
+        self.voice_text = ft.Text("Listening...")
+        self.status_text = ft.Text("Status: Idle")
+        self.start_btn = ft.ElevatedButton("Start Voice Command", on_click=self.start_voice)
+        self.stop_btn = ft.ElevatedButton("Stop", on_click=self.stop)
+
+        self.page.add(self.voice_text, self.status_text, self.start_btn, self.stop_btn)
+
+    def start_voice(self, e):
+        threading.Thread(target=self.listen_voice).start()
+
+    def listen_voice(self):
+        with sr.Microphone() as source:
+            self.status_text.value = "Listening..."
+            self.page.update()
+            try:
+                audio = self.recognizer.listen(source)
+                text = self.recognizer.recognize_google(audio)
+                response = chatgpt_query(text)
+                self.voice_text.value = f"ChatGPT: {response}"
+            except sr.UnknownValueError:
+                self.voice_text.value = "Could not understand"
+            self.page.update()
+
+    def start_camera(self):
+        while self.running:
+            ret, frame = self.camera.read()
+            if not ret:
+                break
+            self.detect_hand(frame)
+            self.detect_eye(frame)
+        self.camera.release()
+        cv2.destroyAllWindows()
+
+    def detect_hand(self, frame):
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.hands.process(rgb_frame)
+        if results.multi_hand_landmarks:
+            self.status_text.value = "Hand Detected"
+        self.page.update()
+
+    def detect_eye(self, frame):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = self.face_cascade.detectMultiScale(gray, 1.3, 5)
+        for (x, y, w, h) in faces:
+            roi_gray = gray[y:y+h, x:x+w]
+            eyes = self.eyes_cascade.detectMultiScale(roi_gray)
+            if len(eyes) > 0:
+                self.status_text.value = "Eyes Detected"
+                self.page.update()
+
+    def stop(self, e):
+        self.running = False
+        self.camera.release()
+        self.page.window_close()
+
+def main(page: ft.Page):
+    assistant = AIAssistant(page)
+    threading.Thread(target=assistant.start_camera).start()
+
 ft.app(target=main)
+        
